@@ -41,8 +41,11 @@ class Resume(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     owner = relationship("User", back_populates="resumes")
-    matches = relationship("JobMatch", back_populates="resume")
-
+    matches = relationship(
+        "JobMatch",
+        back_populates="resume",
+        cascade="all, delete-orphan"
+)
 
 class Job(Base):
     __tablename__ = "jobs"

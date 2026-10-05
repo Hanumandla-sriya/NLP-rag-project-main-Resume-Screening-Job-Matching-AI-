@@ -1,94 +1,135 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { resumeAPI } from '../services/api';
 
 const ResumeList = ({ resumes, onDeleted, onMatch, jobs }) => {
-  const handleDelete = async (id) => {
-    if (window.confirm('Are you sure you want to delete this resume?')) {
-      try {
-        await resumeAPI.delete(id);
-        if (onDeleted) {
-          onDeleted();
-        }
-      } catch (err) {
-        alert('Error deleting resume');
-      }
+  const [selectedJobs, setSelectedJobs] = useState({});
+  const [deletingId, setDeletingId] = useState(null);
+
+  const handleDelete = async (resumeId) => {
+    if (!window.confirm('Are you sure you want to delete this resume?')) {
+      return;
+    }
+
+    try {
+      setDeletingId(resumeId);
+      await resumeAPI.delete(resumeId);
+      onDeleted();
+    } catch (error) {
+      alert(error.response?.data?.detail || 'Failed to delete resume.');
+    } finally {
+      setDeletingId(null);
     }
   };
 
   const handleMatchClick = (resumeId) => {
-    if (jobs.length === 0) {
-      alert('Please create a job posting first');
+    const jobId = selectedJobs[resumeId] || jobs[0]?.id;
+
+    if (!jobId) {
+      alert('Please create a job first.');
       return;
     }
-    const jobId = jobs[0].id; // Match with first job, or you can add a selector
-    if (onMatch) {
-      onMatch(jobId, [resumeId]);
-    }
+
+    onMatch(jobId);
   };
 
-  if (resumes.length === 0) {
+  if (!resumes || resumes.length === 0) {
     return (
-      <div className="card">
-        <p>No resumes uploaded yet. Upload a resume to get started.</p>
+      <div className="empty-state">
+        <h3>No resumes uploaded yet</h3>
+        <p>Upload a resume to start screening candidates.</p>
       </div>
     );
   }
 
   return (
-    <div className="card">
-      <h2>Uploaded Resumes ({resumes.length})</h2>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Filename</th>
-            <th>Skills</th>
-            <th>Experience</th>
-            <th>Education</th>
-            <th>Uploaded</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {resumes.map((resume) => (
-            <tr key={resume.id}>
-              <td>{resume.filename}</td>
-              <td>
-                {resume.skills && resume.skills.length > 0 ? (
-                  <div>
-                    {resume.skills.slice(0, 3).map((skill, idx) => (
-                      <span key={idx} className="badge badge-info" style={{ marginRight: '5px' }}>
-                        {skill}
-                      </span>
-                    ))}
-                    {resume.skills.length > 3 && ` +${resume.skills.length - 3} more`}
-                  </div>
-                ) : (
-                  'N/A'
+    <div>
+      <div className="section-heading">
+        <h2>Uploaded Resumes</h2>
+        <span className="count-badge">{resumes.length} Resumes</span>
+      </div>
+
+      <div className="resume-grid">
+        {resumes.map((resume) => (
+          <div className="resume-card" key={resume.id}>
+            <div className="resume-card-header">
+              <div className="file-icon">PDF</div>
+              <div>
+                <h3>{resume.filename}</h3>
+                <p>Resume ID: {resume.id}</p>
+              </div>
+            </div>
+
+            <div className="resume-stats">
+              <div>
+                <strong>{resume.skills?.length || 0}</strong>
+                <span>Skills</span>
+              </div>
+              <div>
+                <strong>{resume.experience?.length || 0}</strong>
+                <span>Experience</span>
+              </div>
+              <div>
+                <strong>{resume.education?.length || 0}</strong>
+                <span>Education</span>
+              </div>
+            </div>
+
+            <div className="resume-skills">
+              <h4>Detected Skills</h4>
+              <div className="skill-tags">
+                {(resume.skills || []).slice(0, 5).map((skill, index) => (
+                  <span className="skill-tag" key={index}>
+                    {typeof skill === 'string' ? skill : skill.name}
+                  </span>
+                ))}
+                {(resume.skills || []).length > 5 && (
+                  <span className="skill-tag">
+                    +{resume.skills.length - 5} more
+                  </span>
                 )}
-              </td>
-              <td>{resume.experience?.length || 0} entries</td>
-              <td>{resume.education?.length || 0} entries</td>
-              <td>{new Date(resume.created_at).toLocaleDateString()}</td>
-              <td>
-                <button
-                  onClick={() => handleMatchClick(resume.id)}
-                  className="btn btn-primary"
-                  style={{ marginRight: '5px', fontSize: '12px', padding: '5px 10px' }}
-                >
-                  Match
-                </button>
-                <button
-                  onClick={() => handleDelete(resume.id)}
-                  className="btn btn-danger"
-                  style={{ fontSize: '12px', padding: '5px 10px' }}
-                >
-                  Delete
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+              </div>
+            </div>
+
+            <div className="match-selector">
+              <label htmlFor={`job-${resume.id}`}>Select Job</label>
+              <select
+                id={`job-${resume.id}`}
+                value={selectedJobs[resume.id] || jobs[0]?.id || ''}
+                onChange={(e) =>
+                  setSelectedJobs({
+                    ...selectedJobs,
+                    [resume.id]: e.target.value
+                  })
+                }
+              >
+                {jobs.map((job) => (
+                  <option key={job.id} value={job.id}>
+                    {job.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="resume-actions">
+              <button
+                className="btn-primary"
+                onClick={() => handleMatchClick(resume.id)}
+                disabled={jobs.length === 0}
+              >
+                Match Resume
+              </button>
+
+              <button
+                className="btn-danger"
+                onClick={() => handleDelete(resume.id)}
+                disabled={deletingId === resume.id}
+              >
+                {deletingId === resume.id ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 };

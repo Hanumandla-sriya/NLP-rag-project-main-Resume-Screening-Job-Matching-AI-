@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
+from typing import List, Optional
 from datetime import datetime
 
 
@@ -26,17 +26,25 @@ class JobResponse(JobBase):
 
 
 class MatchRequest(BaseModel):
-    resume_ids: Optional[List[int]] = None  # If None, match all resumes
+    resume_ids: Optional[List[int]] = None
+    # If None, match all resumes
 
 
 class MatchScore(BaseModel):
     resume_id: int
     filename: str
+
     overall_score: float
+
     skill_match_score: Optional[float] = None
     experience_score: Optional[float] = None
     education_score: Optional[float] = None
     semantic_similarity: Optional[float] = None
+
+    # Explainability
+    matched_skills: List[str] = Field(default_factory=list)
+    missing_skills: List[str] = Field(default_factory=list)
+
     rank: int
 
 
