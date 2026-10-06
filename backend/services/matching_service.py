@@ -10,6 +10,11 @@ Calculates:
 
 All internal scores are normalized between 0.0 and 1.0.
 The frontend should multiply these values by 100 when displaying percentages.
+
+Embeddings are generated with fastembed (ONNX Runtime) instead of
+sentence-transformers/PyTorch to keep memory usage low on small instances.
+The model (all-MiniLM-L6-v2) and its 384-dimension output are unchanged,
+so previously stored embeddings remain compatible.
 """
 
 import logging
@@ -18,8 +23,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+from fastembed import TextEmbedding
 
 from ..core.config import settings
 
@@ -88,26 +92,32 @@ class MatchingService:
 
         self.model = self._load_model()
 
-    def _load_model(self) -> SentenceTransformer:
-        """Load Sentence Transformer model."""
+    def _load_model(self) -> TextEmbedding:
+        """Load a lightweight ONNX embedding model."""
         try:
-            model = SentenceTransformer(self.model_name)
+            name = self.model_name
+
+            # fastembed expects the full Hugging Face model id.
+            if "/" not in name:
+                name = f"sentence-transformers/{name}"
+
+            model = TextEmbedding(model_name=name, threads=1)
 
             logger.info(
-                "Successfully loaded Sentence Transformer model: %s",
-                self.model_name,
+                "Successfully loaded embedding model: %s",
+                name,
             )
 
             return model
 
         except Exception as exc:
             logger.exception(
-                "Failed to load Sentence Transformer model '%s'.",
+                "Failed to load embedding model '%s'.",
                 self.model_name,
             )
 
             raise RuntimeError(
-                f"Failed to load Sentence Transformer model "
+                f"Failed to load embedding model "
                 f"'{self.model_name}'."
             ) from exc
 
@@ -197,6 +207,18 @@ class MatchingService:
     # EMBEDDINGS
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _to_unit_vector(embedding: Any) -> List[float]:
+        """Convert an embedding to a normalized list of floats."""
+        vector = np.asarray(embedding, dtype=float)
+
+        norm = np.linalg.norm(vector)
+
+        if norm > 0:
+            vector = vector / norm
+
+        return vector.tolist()
+
     def generate_embedding(
         self,
         text: str,
@@ -209,13 +231,11 @@ class MatchingService:
             return [0.0] * self.EMBEDDING_DIMENSION
 
         try:
-            embedding = self.model.encode(
-                normalized_text,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
+            embedding = next(
+                iter(self.model.embed([normalized_text]))
             )
 
-            return embedding.astype(float).tolist()
+            return self._to_unit_vector(embedding)
 
         except Exception as exc:
             logger.exception(
@@ -241,13 +261,12 @@ class MatchingService:
             return []
 
         try:
-            embeddings = self.model.encode(
-                normalized_texts,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-            )
-
-            return embeddings.astype(float).tolist()
+            return [
+                self._to_unit_vector(embedding)
+                for embedding in self.model.embed(
+                    normalized_texts
+                )
+            ]
 
         except Exception as exc:
             logger.exception(
@@ -266,26 +285,22 @@ class MatchingService:
         """
         Calculate cosine similarity.
 
-        Because Sentence Transformers embeddings are normalized,
-        cosine similarity is naturally in approximately [-1, 1].
-
+        Cosine similarity is naturally in [-1, 1].
         We convert it to [0, 1] for scoring.
         """
 
-        if not embedding1 or not embedding2:
+        if (
+            embedding1 is None
+            or embedding2 is None
+            or len(embedding1) == 0
+            or len(embedding2) == 0
+        ):
             return 0.0
 
-        vector1 = np.asarray(
-            embedding1,
-            dtype=float,
-        ).reshape(1, -1)
+        vector1 = np.asarray(embedding1, dtype=float).ravel()
+        vector2 = np.asarray(embedding2, dtype=float).ravel()
 
-        vector2 = np.asarray(
-            embedding2,
-            dtype=float,
-        ).reshape(1, -1)
-
-        if vector1.shape[1] != vector2.shape[1]:
+        if vector1.shape[0] != vector2.shape[0]:
             raise ValueError(
                 "Embedding dimensions do not match."
             )
@@ -296,19 +311,14 @@ class MatchingService:
         if norm1 == 0 or norm2 == 0:
             return 0.0
 
-        similarity = cosine_similarity(
-            vector1,
-            vector2,
-        )[0][0]
+        similarity = float(
+            np.dot(vector1, vector2) / (norm1 * norm2)
+        )
 
         # Convert [-1, 1] -> [0, 1].
-        normalized_similarity = (
-            float(similarity) + 1.0
-        ) / 2.0
+        normalized_similarity = (similarity + 1.0) / 2.0
 
-        return self._clamp_score(
-            normalized_similarity
-        )
+        return self._clamp_score(normalized_similarity)
 
     # ------------------------------------------------------------------
     # SKILL MATCHING
@@ -321,13 +331,8 @@ class MatchingService:
     ) -> Dict[str, List[str]]:
         """Return matched and missing skills."""
 
-        resume_set = self._normalize_skills(
-            resume_skills
-        )
-
-        job_set = self._normalize_skills(
-            job_skills
-        )
+        resume_set = self._normalize_skills(resume_skills)
+        job_set = self._normalize_skills(job_skills)
 
         matched_skills = sorted(
             resume_set.intersection(job_set)
@@ -362,13 +367,8 @@ class MatchingService:
             4 / 5 = 0.80
         """
 
-        resume_set = self._normalize_skills(
-            resume_skills
-        )
-
-        job_set = self._normalize_skills(
-            job_skills
-        )
+        resume_set = self._normalize_skills(resume_skills)
+        job_set = self._normalize_skills(job_skills)
 
         if not job_set:
             return 1.0
@@ -376,9 +376,7 @@ class MatchingService:
         if not resume_set:
             return 0.0
 
-        matched_skills = resume_set.intersection(
-            job_set
-        )
+        matched_skills = resume_set.intersection(job_set)
 
         return self._clamp_score(
             len(matched_skills) / len(job_set)
@@ -419,13 +417,8 @@ class MatchingService:
 
             start_date, end_date = dates
 
-            start_year = self._extract_year(
-                start_date
-            )
-
-            end_year = self._extract_year(
-                end_date
-            )
+            start_year = self._extract_year(start_date)
+            end_year = self._extract_year(end_date)
 
             if start_year is None:
                 continue
@@ -443,16 +436,11 @@ class MatchingService:
             ):
                 continue
 
-            total_months += (
-                end_year - start_year
-            ) * 12
+            total_months += (end_year - start_year) * 12
 
         # If experience entries exist but dates could not
         # be parsed, do not invent 6 months per entry.
-        return round(
-            total_months / 12.0,
-            2,
-        )
+        return round(total_months / 12.0, 2)
 
     @staticmethod
     def _extract_year(
@@ -468,11 +456,7 @@ class MatchingService:
             str(value),
         )
 
-        return (
-            int(match.group())
-            if match
-            else None
-        )
+        return int(match.group()) if match else None
 
     def calculate_experience_score(
         self,
@@ -483,10 +467,8 @@ class MatchingService:
     ) -> float:
         """Calculate experience compatibility."""
 
-        experience_years = (
-            self.calculate_experience_years(
-                resume_experience
-            )
+        experience_years = self.calculate_experience_years(
+            resume_experience
         )
 
         if not job_experience_level:
@@ -494,15 +476,9 @@ class MatchingService:
             # unfairly penalize a fresher.
             return 1.0
 
-        level = (
-            str(job_experience_level)
-            .strip()
-            .lower()
-        )
+        level = str(job_experience_level).strip().lower()
 
-        required_years = (
-            self.EXPERIENCE_REQUIREMENTS.get(level)
-        )
+        required_years = self.EXPERIENCE_REQUIREMENTS.get(level)
 
         if required_years is None:
 
@@ -514,9 +490,7 @@ class MatchingService:
             )
 
             if year_match:
-                required_years = float(
-                    year_match.group(1)
-                )
+                required_years = float(year_match.group(1))
             else:
                 # Unknown requirement.
                 return 1.0
@@ -574,10 +548,7 @@ class MatchingService:
             return 1.0
 
         required_degree = str(
-            job_requirements.get(
-                "degree",
-                "",
-            )
+            job_requirements.get("degree", "")
         ).lower().strip()
 
         if not required_degree:
@@ -603,9 +574,7 @@ class MatchingService:
         skill_match: float,
         experience_score: float,
         education_score: float,
-        weights: Optional[
-            Dict[str, float]
-        ] = None,
+        weights: Optional[Dict[str, float]] = None,
     ) -> float:
         """
         Calculate weighted overall score.
@@ -638,9 +607,7 @@ class MatchingService:
                 "semantic, skills, experience, education."
             )
 
-        total_weight = sum(
-            selected_weights.values()
-        )
+        total_weight = sum(selected_weights.values())
 
         if total_weight <= 0:
             raise ValueError(
@@ -682,109 +649,63 @@ class MatchingService:
         job_description: str,
         job_skills: Optional[Sequence[str]],
         job_experience_level: Optional[str] = None,
-        resume_embedding: Optional[
-            Sequence[float]
-        ] = None,
-        job_embedding: Optional[
-            Sequence[float]
-        ] = None,
+        resume_embedding: Optional[Sequence[float]] = None,
+        job_embedding: Optional[Sequence[float]] = None,
     ) -> Dict[str, Any]:
         """Match a resume against a job description."""
 
         final_resume_embedding = (
             list(resume_embedding)
             if resume_embedding
-            else self.generate_embedding(
-                resume_text
-            )
+            else self.generate_embedding(resume_text)
         )
 
         final_job_embedding = (
             list(job_embedding)
             if job_embedding
-            else self.generate_embedding(
-                job_description
-            )
+            else self.generate_embedding(job_description)
         )
 
-        semantic_similarity = (
-            self.calculate_semantic_similarity(
-                final_resume_embedding,
-                final_job_embedding,
-            )
+        semantic_similarity = self.calculate_semantic_similarity(
+            final_resume_embedding,
+            final_job_embedding,
         )
 
-        skill_match = (
-            self.calculate_skill_match_score(
-                resume_skills,
-                job_skills,
-            )
+        skill_match = self.calculate_skill_match_score(
+            resume_skills,
+            job_skills,
         )
 
-        skill_details = (
-            self.get_skill_match_details(
-                resume_skills,
-                job_skills,
-            )
+        skill_details = self.get_skill_match_details(
+            resume_skills,
+            job_skills,
         )
 
-        experience_score = (
-            self.calculate_experience_score(
-                resume_experience,
-                job_experience_level,
-            )
+        experience_score = self.calculate_experience_score(
+            resume_experience,
+            job_experience_level,
         )
 
-        education_score = (
-            self.calculate_education_score(
-                resume_education,
-            )
+        education_score = self.calculate_education_score(
+            resume_education,
         )
 
-        overall_score = (
-            self.calculate_overall_score(
-                semantic_similarity=semantic_similarity,
-                skill_match=skill_match,
-                experience_score=experience_score,
-                education_score=education_score,
-            )
+        overall_score = self.calculate_overall_score(
+            semantic_similarity=semantic_similarity,
+            skill_match=skill_match,
+            experience_score=experience_score,
+            education_score=education_score,
         )
 
         return {
             # Internal scores remain 0.0 - 1.0.
-            "overall_score": round(
-                overall_score,
-                4,
-            ),
-
-            "semantic_similarity": round(
-                semantic_similarity,
-                4,
-            ),
-
-            "skill_match_score": round(
-                skill_match,
-                4,
-            ),
-
-            "experience_score": round(
-                experience_score,
-                4,
-            ),
-
-            "education_score": round(
-                education_score,
-                4,
-            ),
-
-            "matched_skills": skill_details[
-                "matched_skills"
-            ],
-
-            "missing_skills": skill_details[
-                "missing_skills"
-            ],
-
+            "overall_score": round(overall_score, 4),
+            "semantic_similarity": round(semantic_similarity, 4),
+            "skill_match_score": round(skill_match, 4),
+            "experience_score": round(experience_score, 4),
+            "education_score": round(education_score, 4),
+            "matched_skills": skill_details["matched_skills"],
+            "missing_skills": skill_details["missing_skills"],
             "resume_embedding": final_resume_embedding,
             "job_embedding": final_job_embedding,
         }
