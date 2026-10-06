@@ -3,7 +3,7 @@ Job management and resume-to-job matching API routes.
 """
 
 import logging
-from typing import List
+from typing import Any, List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import SQLAlchemyError
@@ -34,6 +34,17 @@ router = APIRouter(
 
 # Load the semantic matching model once when the application starts.
 matching_service = MatchingService()
+
+
+def _has_embedding(value: Any) -> bool:
+    """Safely check whether a stored embedding exists and is non-empty."""
+    if value is None:
+        return False
+
+    try:
+        return len(value) > 0
+    except TypeError:
+        return False
 
 
 @router.post(
@@ -194,11 +205,11 @@ def match_candidates(
             detail="Job not found.",
         )
 
-    # ---------------------------------------------------------
-    # 2. Ensure the job has an embedding.
-    # ---------------------------------------------------------
     try:
-        if not job.embedding:
+        # -----------------------------------------------------
+        # 2. Ensure the job has an embedding.
+        # -----------------------------------------------------
+        if not _has_embedding(job.embedding):
             job.embedding = matching_service.generate_embedding(
                 job.description
             )
@@ -239,7 +250,7 @@ def match_candidates(
 
             # Generate the resume embedding only if it does
             # not already exist.
-            if not resume.embedding:
+            if not _has_embedding(resume.embedding):
                 resume.embedding = (
                     matching_service.generate_embedding(
                         resume.raw_text or ""
@@ -468,10 +479,13 @@ def get_rankings(
     matches = []
 
     for match, resume in results:
+        # Pass resume_text so matched/missing skills here are
+        # identical to what the match endpoint returns.
         skill_details = (
             matching_service.get_skill_match_details(
                 resume_skills=resume.skills or [],
                 job_skills=job.required_skills or [],
+                resume_text=resume.raw_text or "",
             )
         )
 

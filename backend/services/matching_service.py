@@ -285,8 +285,10 @@ class MatchingService:
         """
         Calculate cosine similarity.
 
-        Cosine similarity is naturally in [-1, 1].
-        We convert it to [0, 1] for scoring.
+        Cosine similarity is naturally in [-1, 1]. For text embeddings
+        real values are almost always 0 to 1, so we clamp negatives to 0
+        instead of remapping with (x + 1) / 2, which inflated unrelated
+        documents to roughly 55-60%.
         """
 
         if (
@@ -315,10 +317,7 @@ class MatchingService:
             np.dot(vector1, vector2) / (norm1 * norm2)
         )
 
-        # Convert [-1, 1] -> [0, 1].
-        normalized_similarity = (similarity + 1.0) / 2.0
-
-        return self._clamp_score(normalized_similarity)
+        return self._clamp_score(similarity)
 
     # ------------------------------------------------------------------
     # SKILL MATCHING
