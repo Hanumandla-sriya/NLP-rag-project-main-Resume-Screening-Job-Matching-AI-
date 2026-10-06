@@ -20,7 +20,7 @@ so previously stored embeddings remain compatible.
 import logging
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 import numpy as np
 from fastembed import TextEmbedding
@@ -158,7 +158,7 @@ class MatchingService:
     def _normalize_skills(
         cls,
         skills: Optional[Sequence[str]],
-    ) -> set[str]:
+    ) -> Set[str]:
         """
         Convert skills into a normalized set.
 
@@ -323,6 +323,36 @@ class MatchingService:
     # ------------------------------------------------------------------
     # SKILL MATCHING
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_matched_skills(
+        resume_set: Set[str],
+        job_set: Set[str],
+        resume_text: Optional[str] = None,
+    ) -> Set[str]:
+        """
+        Return the job skills the candidate has.
+
+        A job skill counts as matched if it is in the parsed resume
+        skills, or if it appears as a whole word/phrase in the raw
+        resume text (catches skills the parser missed).
+        """
+
+        matched = set(resume_set & job_set)
+
+        text = (resume_text or "").lower()
+
+        if text:
+            for skill in job_set - matched:
+                pattern = (
+                    rf"(?<![a-z0-9]){re.escape(skill)}(?![a-z0-9])"
+                )
+
+                if re.search(pattern, text):
+                    matched.add(skill)
+
+        return matched
+
     def get_skill_match_details(
         self,
         resume_skills: Optional[Sequence[str]],
@@ -349,9 +379,13 @@ class MatchingService:
         self,
         resume_skills: Optional[Sequence[str]],
         job_skills: Optional[Sequence[str]],
+        resume_text: Optional[str] = None,
     ) -> float:
         """
         Calculate required skill coverage.
+
+        Uses the same matching logic as get_skill_match_details so the
+        score always agrees with the matched/missing lists.
 
         Example:
 
@@ -371,14 +405,13 @@ class MatchingService:
         if not job_set:
             return 1.0
 
-        if not resume_set:
-            return 0.0
-
-        matched_skills = resume_set.intersection(job_set)
-
-        return self._clamp_score(
-            len(matched_skills) / len(job_set)
+        matched = self._find_matched_skills(
+            resume_set,
+            job_set,
+            resume_text,
         )
+
+        return self._clamp_score(len(matched) / len(job_set))
 
     # ------------------------------------------------------------------
     # EXPERIENCE
@@ -649,18 +682,30 @@ class MatchingService:
         job_experience_level: Optional[str] = None,
         resume_embedding: Optional[Sequence[float]] = None,
         job_embedding: Optional[Sequence[float]] = None,
+        job_education_requirements: Optional[
+            Dict[str, Any]
+        ] = None,
     ) -> Dict[str, Any]:
         """Match a resume against a job description."""
 
+        # Temporary debug line: remove once skills look correct.
+        logger.info(
+            "Matching: job_skills=%r resume_skills=%r",
+            job_skills,
+            resume_skills,
+        )
+
         final_resume_embedding = (
             list(resume_embedding)
-            if resume_embedding
+            if resume_embedding is not None
+            and len(resume_embedding) > 0
             else self.generate_embedding(resume_text)
         )
 
         final_job_embedding = (
             list(job_embedding)
-            if job_embedding
+            if job_embedding is not None
+            and len(job_embedding) > 0
             else self.generate_embedding(job_description)
         )
 
@@ -669,17 +714,20 @@ class MatchingService:
             final_job_embedding,
         )
 
-        skill_match = self.calculate_skill_match_score(
-            resume_skills,
-            job_skills,
+        # One source of truth for skills: the score and the
+        # matched/missing lists come from the same matched set.
+        skill_details = self.get_skill_match_details(
+            resume_skills=resume_skills,
+            job_skills=job_skills,
+            resume_text=resume_text,
         )
 
-        skill_details = (
-            self.get_skill_match_details(
-                resume_skills=resume.skills or [],
-                job_skills=job.required_skills or [],
-                resume_text=resume.raw_text or "",
-            )
+        job_skill_set = self._normalize_skills(job_skills)
+
+        skill_match = (
+            len(skill_details["matched_skills"]) / len(job_skill_set)
+            if job_skill_set
+            else 1.0
         )
 
         experience_score = self.calculate_experience_score(
@@ -689,6 +737,7 @@ class MatchingService:
 
         education_score = self.calculate_education_score(
             resume_education,
+            job_education_requirements,
         )
 
         overall_score = self.calculate_overall_score(
