@@ -323,28 +323,26 @@ class MatchingService:
     # ------------------------------------------------------------------
     # SKILL MATCHING
     # ------------------------------------------------------------------
-
     def get_skill_match_details(
         self,
         resume_skills: Optional[Sequence[str]],
         job_skills: Optional[Sequence[str]],
+        resume_text: Optional[str] = None,
     ) -> Dict[str, List[str]]:
         """Return matched and missing skills."""
 
         resume_set = self._normalize_skills(resume_skills)
         job_set = self._normalize_skills(job_skills)
 
-        matched_skills = sorted(
-            resume_set.intersection(job_set)
-        )
-
-        missing_skills = sorted(
-            job_set.difference(resume_set)
+        matched = self._find_matched_skills(
+            resume_set,
+            job_set,
+            resume_text,
         )
 
         return {
-            "matched_skills": matched_skills,
-            "missing_skills": missing_skills,
+            "matched_skills": sorted(matched),
+            "missing_skills": sorted(job_set - matched),
         }
 
     def calculate_skill_match_score(
@@ -676,9 +674,12 @@ class MatchingService:
             job_skills,
         )
 
-        skill_details = self.get_skill_match_details(
-            resume_skills,
-            job_skills,
+        skill_details = (
+            matching_service.get_skill_match_details(
+                resume_skills=resume.skills or [],
+                job_skills=job.required_skills or [],
+                resume_text=resume.raw_text or "",
+            )
         )
 
         experience_score = self.calculate_experience_score(
