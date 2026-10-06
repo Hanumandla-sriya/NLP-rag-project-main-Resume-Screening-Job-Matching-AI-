@@ -675,7 +675,7 @@ class MatchingService:
         )
 
         skill_details = (
-            matching_service.get_skill_match_details(
+            self.get_skill_match_details(
                 resume_skills=resume.skills or [],
                 job_skills=job.required_skills or [],
                 resume_text=resume.raw_text or "",
