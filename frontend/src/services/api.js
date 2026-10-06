@@ -47,12 +47,14 @@ export const authAPI = {
     });
     return response.data;
   },
-  register: async (username, email, password) => {
-    const response = await api.post('/auth/register', {
-      username,
-      email,
-      password,
-    });
+  // Accepts either register({ username, email, password })
+  // or register(username, email, password)
+  register: async (usernameOrData, email, password) => {
+    const payload =
+      typeof usernameOrData === 'object'
+        ? usernameOrData
+        : { username: usernameOrData, email, password };
+    const response = await api.post('/auth/register', payload);
     return response.data;
   },
 };
@@ -68,7 +70,7 @@ export const resumeAPI = {
     return response.data;
   },
   getAll: async () => {
-    const response = await api.get('/resumes');
+    const response = await api.get('/resumes/'); // trailing slash added
     return response.data;
   },
   getById: async (id) => {
@@ -83,11 +85,11 @@ export const resumeAPI = {
 // Job API
 export const jobAPI = {
   create: async (jobData) => {
-    const response = await api.post('/jobs', jobData);
+    const response = await api.post('/jobs/', jobData); // trailing slash added
     return response.data;
   },
   getAll: async () => {
-    const response = await api.get('/jobs');
+    const response = await api.get('/jobs/'); // trailing slash added
     return response.data;
   },
   getById: async (id) => {
